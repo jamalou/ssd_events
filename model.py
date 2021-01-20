@@ -1,3 +1,57 @@
+"""SSD model builder
+Utilities for building network layers are also provided
+"""
+
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+
+from tensorflow.keras.layers import Activation, Dense, Input
+from tensorflow.keras.layers import Conv2D, Flatten
+from tensorflow.keras.layers import BatchNormalization, Concatenate
+from tensorflow.keras.layers import ELU, MaxPooling2D, Reshape
+from tensorflow.keras.models import Model
+from tensorflow.keras import backend as K
+
+import numpy as np
+
+
+def conv2d(inputs,
+           filters=32,
+           kernel_size=3,
+           strides=1,
+           name=None):
+
+    conv = Conv2D(filters=filters,
+                  kernel_size=kernel_size,
+                  strides=strides,
+                  kernel_initializer='he_normal',
+                  name=name,
+                  padding='same')
+
+    return conv(inputs)
+
+
+def conv_layer(inputs,
+               filters=32,
+               kernel_size=3,
+               strides=1,
+               use_maxpool=True,
+               postfix=None,
+               activation=None):
+
+    x = conv2d(inputs,
+               filters=filters,
+               kernel_size=kernel_size,
+               strides=strides,
+               name='conv'+postfix)
+    x = BatchNormalization(name="bn"+postfix)(x)
+    x = ELU(name='elu'+postfix)(x)
+    if use_maxpool:
+        x = MaxPooling2D(name='pool'+postfix)(x)
+    return x
+
 def build_ssd(input_shape,
               backbone,
               n_layers=4,
@@ -42,4 +96,46 @@ def build_ssd(input_shape,
                          n_anchors*4,
                          kernel_size=4,
                          name=name)
+
+        shape = np.array(K.int_shape(offsets))[1:]
+        feature_shapes.append(shape)
+
+        # reshape the class predictions, yielding 3D tensors of shape (batch, height * width * n_anchors, n_classes)
+        # last axis to perform softmax on them
+        name = "cls_res" + str(i + 1)
+        classes = Reshape((-1, n_classes), name=name)(classes)
+
+        # reshape the offset predictions, yielding 3D tensors of shape (batch, height * width * n_anchors, 4)
+        # last axis to compute the (smooth) L1 or L2 loss
+        name = "off_res" + str(i + 1)
+        offsets = Reshape((-1, 4), name=name)(offsets)
+        # concat for alignment with ground truth size made of ground truth offsets and mask of same dim
+        # needed during loss computation
+        offsets = [offsets, offsets]
+        name = "off_cat" + str(i + 1)
+        offsets = Concatenate(axis=-1, name=name)(offsets)
+
+        # collect offset prediction per scale
+        out_off.append(offsets)
+
+        name = "cls_out" + str(i + 1)
+
+        classes = Activation('softmax', name=name)(classes)
+
+        # collect class prediction per scale
+        out_cls.append(classes)
+
+    if n_layers > 1:
+        # concat all class and offset from each scale
+        offsets = Concatenate(axis=1, name="offsets")(out_off)
+        classes = Concatenate(axis=1, name="classes")(out_cls)
+    else:
+        offsets = out_off[0]
+        classes = out_cls[0]
+
+    outputs = [classes, offsets]
+    model = Model(inputs=inputs,
+                  outputs=outputs,
+                  name='ssd_head')
+
     return n_anchors, feature_shapes, model
